@@ -113,9 +113,6 @@ config.setdefault("strip_cjk", True)
 config.setdefault("reject_non_ascii", True)
 config.setdefault("reject_non_ascii_ratio", 0.15)
 
-# optional (can be slower on network drives)
-config.setdefault("show_lyrics_status", False)
-
 save_config(config)
 
 MUSIC_DIR = config.get("music_dir", "")
@@ -202,10 +199,6 @@ def get_lang_code():
 
 def allow_plain_fallback():
     return bool(config.get("allow_plain_fallback", False))
-
-
-def show_status_icons():
-    return bool(config.get("show_lyrics_status", False))
 
 
 def get_enabled_providers_in_order():
@@ -436,6 +429,15 @@ def create_tooltip(widget, text):
 
 
 # ------------------ Keyboard Shortcuts ------------------
+
+def set_busy_cursor():
+    root.configure(cursor="watch")
+    root.update()
+
+def set_normal_cursor():
+    root.configure(cursor="")
+    root.update()
+
 
 def setup_keyboard_shortcuts():
     """Setup global keyboard shortcuts"""
@@ -869,6 +871,7 @@ def start_download():
         return
     cancel_requested = False
     cancel_btn.configure(state="normal")
+    set_busy_cursor()
     threading.Thread(target=download_selected, daemon=True).start()
 
 
@@ -907,10 +910,12 @@ def download_selected():
     if not artist_list.curselection() and not album_list.curselection() and not track_list.curselection():
         ui_call(messagebox.showwarning, "Select", "Select an artist/album/track first.")
         ui_call(cancel_btn.configure, {"state": "disabled"})
+        ui_call(set_normal_cursor)
         return
     if not MUSIC_DIR or not os.path.isdir(MUSIC_DIR):
         ui_call(messagebox.showwarning, "Music folder", "Pick a valid music folder first.")
         ui_call(cancel_btn.configure, {"state": "disabled"})
+        ui_call(set_normal_cursor)
         return
 
     downloading = True
@@ -944,6 +949,7 @@ def download_selected():
             ui_call(missing_scan_btn.configure, {"state": "normal"})
             ui_call(missing_dl_btn.configure, {"state": "normal"})
             ui_call(cancel_btn.configure, {"state": "disabled"})
+            ui_call(set_normal_cursor)
             return
         else:
             base_artist = os.path.join(MUSIC_DIR, artist)
@@ -1149,6 +1155,7 @@ def download_selected():
     ui_call(missing_scan_btn.configure, {"state": "normal"})
     ui_call(missing_dl_btn.configure, {"state": "normal"})
     ui_call(cancel_btn.configure, {"state": "disabled"})
+    ui_call(set_normal_cursor)
 
 
 # ------------------ Missing (Selection-only) ------------------
@@ -1167,86 +1174,79 @@ def build_missing_for_selection():
         set_status("Select an artist/album/track first.")
         return
 
-    # Count what we're about to scan
+    # Snapshot UI state needed by the worker before threading
+    sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
+    sel_tracks = [track_list.get(i) for i in track_list.curselection()]
+
     if len(selected_artists) > 1:
         item_desc = f"{len(selected_artists)} artists"
+    elif sel_tracks:
+        item_desc = f"{len(sel_tracks)} tracks"
+    elif sel_albums:
+        item_desc = f"{len(sel_albums)} albums"
     else:
-        sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
-        if track_list.curselection():
-            item_desc = f"{len(track_list.curselection())} tracks"
-        elif sel_albums:
-            item_desc = f"{len(sel_albums)} albums"
-        else:
-            item_desc = "1 artist"
+        item_desc = "1 artist"
 
     set_status(f"Scanning {item_desc}...")
     log(f"Scanning {item_desc}...")
+    set_busy_cursor()
 
-    if len(selected_artists) > 1:
-        roots = [os.path.join(MUSIC_DIR, a) for a in selected_artists]
-        for root_dir in roots:
-            for rd, _, files in os.walk(root_dir):
-                for f in files:
-                    if f.lower().endswith((".mp3", ".flac")):
-                        song = os.path.join(rd, f)
-                        lrc = os.path.splitext(song)[0] + ".lrc"
-                        
-                        
-                        if not os.path.exists(lrc):
-                            missing_targets.append(song)
-    else:
-        artist = selected_artists[0]
-        base_artist = os.path.join(MUSIC_DIR, artist)
+    def worker():
+        global missing_targets, scanned_artists
+        found = []
 
-        if track_list.curselection():
-            for i in track_list.curselection():
-                song = resolve_track_display_to_path(artist, track_list.get(i))
-                if os.path.isfile(song) and song.lower().endswith((".mp3", ".flac")):
-                    lrc = os.path.splitext(song)[0] + ".lrc"
-                    
-                    
-                    if not os.path.exists(lrc):
-                        missing_targets.append(song)
-        else:
-            sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
-            roots = [os.path.join(base_artist, alb) for alb in sel_albums] if sel_albums else [base_artist]
-
+        if len(selected_artists) > 1:
+            roots = [os.path.join(MUSIC_DIR, a) for a in selected_artists]
             for root_dir in roots:
                 for rd, _, files in os.walk(root_dir):
                     for f in files:
                         if f.lower().endswith((".mp3", ".flac")):
                             song = os.path.join(rd, f)
                             lrc = os.path.splitext(song)[0] + ".lrc"
-                            
-                            
                             if not os.path.exists(lrc):
-                                missing_targets.append(song)
+                                found.append(song)
+        else:
+            artist = selected_artists[0]
+            base_artist = os.path.join(MUSIC_DIR, artist)
 
-    seen = set()
-    missing_targets = [p for p in missing_targets if not (p in seen or seen.add(p))]
+            if sel_tracks:
+                for t in sel_tracks:
+                    song = resolve_track_display_to_path(artist, t)
+                    if os.path.isfile(song) and song.lower().endswith((".mp3", ".flac")):
+                        lrc = os.path.splitext(song)[0] + ".lrc"
+                        if not os.path.exists(lrc):
+                            found.append(song)
+            else:
+                roots = [os.path.join(base_artist, alb) for alb in sel_albums] if sel_albums else [base_artist]
+                for root_dir in roots:
+                    for rd, _, files in os.walk(root_dir):
+                        for f in files:
+                            if f.lower().endswith((".mp3", ".flac")):
+                                song = os.path.join(rd, f)
+                                lrc = os.path.splitext(song)[0] + ".lrc"
+                                if not os.path.exists(lrc):
+                                    found.append(song)
 
-    log(f"Missing scan (selection): {len(missing_targets)} tracks missing .lrc")
-    set_status(f"Missing: {len(missing_targets)} tracks without lyrics")
-    
-    # Update button text
-    missing_scan_btn.configure(text=f"Scan Missing (Selection) [{len(missing_targets)}]")
-    missing_dl_btn.configure(state=("normal" if missing_targets else "disabled"))
-    
-    # Mark these artists as scanned so icons will show
-    global scanned_artists
-    for artist in selected_artists:
-        scanned_artists.add(artist)
-    
-    # Clear cache for scanned items to force rescan with icons
-    for artist in selected_artists:
-        ap = os.path.join(MUSIC_DIR, artist)
-        keys_to_remove = [k for k in lyrics_cache.keys() if isinstance(k, tuple) and k[0].startswith(ap)]
-        for k in keys_to_remove:
-            lyrics_cache.pop(k, None)
-    
-    # Refresh the view to show icons for scanned items
-    refresh_artist_list(keep_selection=True)
-    refresh_current_view()
+        seen = set()
+        missing_targets = [p for p in found if not (p in seen or seen.add(p))]
+
+        # Mark artists as scanned and clear their cache
+        for a in selected_artists:
+            scanned_artists.add(a)
+            ap = os.path.join(MUSIC_DIR, a)
+            keys_to_remove = [k for k in lyrics_cache.keys() if isinstance(k, tuple) and k[0].startswith(ap)]
+            for k in keys_to_remove:
+                lyrics_cache.pop(k, None)
+
+        log(f"Missing scan (selection): {len(missing_targets)} tracks missing .lrc")
+        ui_call(set_status, f"Missing: {len(missing_targets)} tracks without lyrics")
+        ui_call(missing_scan_btn.configure, {"text": f"Scan Missing (Selection) [{len(missing_targets)}]"})
+        ui_call(missing_dl_btn.configure, {"state": ("normal" if missing_targets else "disabled")})
+        ui_call(refresh_artist_list, True)
+        ui_call(refresh_current_view)
+        ui_call(set_normal_cursor)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def start_download_missing():
@@ -1264,6 +1264,7 @@ def start_download_missing():
         return
 
     cancel_btn.configure(state="normal")
+    set_busy_cursor()
     threading.Thread(target=download_missing_queue, daemon=True).start()
 
 
@@ -1431,6 +1432,7 @@ def download_missing_queue():
     ui_call(missing_scan_btn.configure, {"state": "normal"})
     ui_call(missing_dl_btn.configure, {"state": "normal"})
     ui_call(cancel_btn.configure, {"state": "disabled"})
+    ui_call(set_normal_cursor)
 
 
 # ------------------ Custom Search ------------------
@@ -1654,9 +1656,11 @@ def open_custom_search():
             ui_call(missing_scan_btn.configure, {"state": "normal"})
             ui_call(missing_dl_btn.configure, {"state": "normal"})
             ui_call(cancel_btn.configure, {"state": "disabled"})
+            ui_call(set_normal_cursor)
             set_status("Done.")
 
         win.destroy()
+        set_busy_cursor()
         threading.Thread(target=worker, daemon=True).start()
 
     tk.Button(
@@ -1764,7 +1768,6 @@ def open_options_window():
     strip_cjk = bool(config.get("strip_cjk", True))
     reject_non_ascii = bool(config.get("reject_non_ascii", True))
     ratio = float(config.get("reject_non_ascii_ratio", 0.15))
-    status_on = bool(config.get("show_lyrics_status", False))
 
     frm = tk.Frame(win, bg=t["bg"])
     frm.pack(fill="both", expand=True, padx=12, pady=12)
@@ -1916,12 +1919,6 @@ def open_options_window():
              bg=t["panel"], fg=t["fg"], insertbackground=t["fg"],
              highlightbackground=t["border"], highlightcolor=t["border"]).grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
 
-    status_var_local = tk.BooleanVar(value=status_on)
-    tk.Checkbutton(
-        bottom_opts, text="Show artist/album/track lyrics status (slower)",
-        variable=status_var_local, bg=t["bg"], fg=t["fg"], selectcolor=t["bg"],
-        activebackground=t["bg"], activeforeground=t["fg"]
-    ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
     footer = tk.Frame(win, bg=t["bg"])
     footer.pack(fill="x", padx=12, pady=12)
@@ -1953,7 +1950,6 @@ def open_options_window():
         config["strip_cjk"] = bool(strip_var.get())
         config["reject_non_ascii"] = bool(rej_var.get())
         config["reject_non_ascii_ratio"] = r
-        config["show_lyrics_status"] = bool(status_var_local.get())
 
         save_config(config)
         lyrics_cache.clear()
