@@ -14,7 +14,7 @@ import queue
 
 APP_NAME = "Synced Lyrics Downloader"
 CONFIG_FILE = str(Path(__file__).with_name("lyrics_gui_config.json"))
-DEFAULT_GITHUB_URL = "https://github.com/type0dev"
+DEFAULT_GITHUB_URL = "https://github.com/type0dev/synced-lyrics-downloader"
 SYNCEDLYRICS_URL = "https://pypi.org/project/syncedlyrics/"
 
 ALL_PROVIDERS = ["Lrclib", "Musixmatch", "Megalobiz", "NetEase", "Genius"]
@@ -254,7 +254,7 @@ def newest_mtime_in_tree(folder: str) -> int:
     try:
         for root_dir, _, files in os.walk(folder):
             for f in files:
-                if f.lower().endswith((".mp3", ".flac", ".lrc", ".txt")):
+                if f.lower().endswith((".mp3", ".flac", ".lrc")):
                     p = os.path.join(root_dir, f)
                     try:
                         newest = max(newest, int(os.path.getmtime(p)))
@@ -275,9 +275,7 @@ def scan_folder_completeness(folder: str):
                     total += 1
                     base = os.path.splitext(os.path.join(root_dir, f))[0]
                     lrc = base + ".lrc"
-                    txt = base + ".txt"
-                    # Count as "have" if EITHER .lrc or .txt exists
-                    if os.path.exists(lrc) or os.path.exists(txt):
+                    if os.path.exists(lrc):
                         have += 1
     except:
         pass
@@ -645,15 +643,11 @@ def on_album_select(event=None):
                         rel_to_album = os.path.relpath(os.path.join(root_dir, file), album_path)
                         track_path = os.path.join(album_path, rel_to_album)
                         lrc_path = os.path.splitext(track_path)[0] + ".lrc"
-                        txt_path = os.path.splitext(track_path)[0] + ".txt"
 
                         prefix = ""
                         if show_icons:
-                            # Check .lrc first, then .txt
                             if os.path.exists(lrc_path):
                                 state = analyze_lrc(lrc_path)
-                            elif os.path.exists(txt_path):
-                                state = analyze_lrc(txt_path)
                             else:
                                 state = "none"
                             prefix = f"{track_icon_for_state(state)} "
@@ -1000,7 +994,7 @@ def download_selected():
             break
 
         lrc = os.path.splitext(song)[0] + ".lrc"
-        txt = os.path.splitext(song)[0] + ".txt"
+        
         song_name = os.path.basename(song)
         title = normalize_title(os.path.splitext(song_name)[0])
 
@@ -1011,167 +1005,69 @@ def download_selected():
         existing_lrc_state = None
         if os.path.exists(lrc):
             existing_lrc_state = analyze_lrc(lrc)
-            
-            # If plain lyrics exist and upgrade is enabled, ask user if they want to upgrade
+
+            # If plain lyrics exist and upgrade is enabled, ask user
             if existing_lrc_state == "plain" and config.get("upgrade_plain_to_synced", True):
                 log("   ℹ Found plain lyrics (.lrc file)")
-                
-                # Ask user if they want to try upgrading
+
                 ui_result = {"done": False, "upgrade": False}
-                
+
                 def ask_on_main():
                     result = messagebox.askyesno(
                         "Upgrade Plain Lyrics?",
-                        f"Found plain lyrics for:\n{song_name}\n\n" +
-                        "Search for synced version?\n" +
-                        "(Plain .lrc will be renamed to .txt if synced found)",
+                        f"Found plain lyrics for:\n{song_name}\n\n"
+                        "Search for a synced version?",
                         parent=root
                     )
                     ui_result["upgrade"] = result
                     ui_result["done"] = True
-                
+
                 ui_call(ask_on_main)
-                
-                # Wait for dialog
                 while not ui_result["done"]:
                     if should_cancel():
                         break
                     import time
                     time.sleep(0.1)
-                
+
                 if should_cancel():
                     break
-                
+
                 if ui_result["upgrade"]:
                     log("   🔄 Searching for synced version...")
-                    
                     inferred_artist = infer_artist_from_path(song) or (selected_artists[0] if selected_artists else "")
                     query = f"{title} {inferred_artist}".strip()
-                    
-                    # Try to find synced version
+
                     found_synced = False
                     for p in providers_synced:
                         if should_cancel():
                             break
                         log(f"      trying synced: {p}")
-                        
-                        # Save to temp file first
                         temp_lrc = lrc + ".temp"
                         if run_provider(query, p, temp_lrc, lang_code, want_synced=True):
-                            # Check if it's actually synced
                             if analyze_lrc(temp_lrc) == "synced":
-                                # Replace plain with synced
                                 try:
-                                    # Rename plain .lrc to .txt for backup
-                                    txt_backup = os.path.splitext(lrc)[0] + ".txt"
-                                    if os.path.exists(txt_backup):
-                                        os.remove(txt_backup)
-                                    os.rename(lrc, txt_backup)
-                                    
-                                    # Move synced to .lrc
+                                    os.remove(lrc)
                                     os.rename(temp_lrc, lrc)
                                     log(f"      ⬆ Upgraded plain → synced [{p}]")
-                                    log(f"      📝 Plain lyrics saved as .txt")
                                     success_count += 1
                                     found_synced = True
                                     break
                                 except:
                                     pass
                             else:
-                                # Not actually synced, remove temp
                                 try:
                                     os.remove(temp_lrc)
                                 except:
                                     pass
-                    
+
                     if not found_synced:
                         log("      ↪ No synced version found, keeping plain .lrc")
-                    
-                    continue  # Move to next song
                 else:
                     log("   ↪ Skipped upgrade, keeping plain .lrc")
-                    continue
-            
-            # Check if plain .txt exists and upgrade is enabled
-            txt_path = os.path.splitext(song)[0] + ".txt"
-            if os.path.exists(txt_path) and config.get("upgrade_plain_to_synced", True):
-                # Check if it's plain lyrics
-                txt_state = analyze_lrc(txt_path)
-                if txt_state == "plain":
-                    log("   ℹ Found plain lyrics (.txt file)")
-                    
-                    # Ask user if they want to try upgrading
-                    ui_result = {"done": False, "upgrade": False}
-                    
-                    def ask_on_main():
-                        result = messagebox.askyesno(
-                            "Upgrade Plain Lyrics?",
-                            f"Found plain lyrics for:\n{song_name}\n\n" +
-                            "Search for synced version?\n" +
-                            "(Plain .txt will be kept if synced found)",
-                            parent=root
-                        )
-                        ui_result["upgrade"] = result
-                        ui_result["done"] = True
-                    
-                    ui_call(ask_on_main)
-                    
-                    # Wait for dialog
-                    while not ui_result["done"]:
-                        if should_cancel():
-                            break
-                        import time
-                        time.sleep(0.1)
-                    
-                    if should_cancel():
-                        break
-                    
-                    if ui_result["upgrade"]:
-                        log("   🔄 Searching for synced version...")
-                        
-                        inferred_artist = infer_artist_from_path(song) or (selected_artists[0] if selected_artists else "")
-                        query = f"{title} {inferred_artist}".strip()
-                        
-                        # Try to find synced version
-                        found_synced = False
-                        for p in providers_synced:
-                            if should_cancel():
-                                break
-                            log(f"      trying synced: {p}")
-                            
-                            # Save to temp file first
-                            temp_lrc = lrc + ".temp"
-                            if run_provider(query, p, temp_lrc, lang_code, want_synced=True):
-                                # Check if it's actually synced
-                                if analyze_lrc(temp_lrc) == "synced":
-                                    # Save synced as .lrc
-                                    try:
-                                        if os.path.exists(lrc):
-                                            os.remove(lrc)
-                                        os.rename(temp_lrc, lrc)
-                                        log(f"      ⬆ Upgraded plain → synced [{p}]")
-                                        log(f"      📝 Plain lyrics kept as .txt")
-                                        success_count += 1
-                                        found_synced = True
-                                        break
-                                    except:
-                                        pass
-                                else:
-                                    # Not actually synced, remove temp
-                                    try:
-                                        os.remove(temp_lrc)
-                                    except:
-                                        pass
-                        
-                        if not found_synced:
-                            log("      ↪ No synced version found, keeping plain .txt")
-                        
-                        continue  # Move to next song
-                    else:
-                        log("   ↪ Skipped upgrade, keeping plain .txt")
-                        continue
-            
-            # Skip if synced or incomplete .lrc already exists
+
+                continue  # Move to next song
+
+            # Skip if .lrc already exists (synced, plain, or incomplete)
             if existing_lrc_state in ("synced", "incomplete"):
                 log(f"   ↪ Skip (already has .lrc)")
                 continue
@@ -1208,25 +1104,6 @@ def download_selected():
                 log(f"   ⚠ Rejected (mostly non-ASCII) [{used}/{mode}]")
                 failed_count += 1
                 continue
-
-            # Automatically rename plain lyrics to .txt
-            lrc_state = analyze_lrc(lrc)
-            if lrc_state == "plain":
-                txt_path = os.path.splitext(lrc)[0] + ".txt"
-                try:
-                    if os.path.exists(txt_path):
-                        os.remove(txt_path)
-                    os.rename(lrc, txt_path)
-                    log(f"   📝 Saved as .txt (plain lyrics)")
-                except Exception as e:
-                    log(f"   ⚠ Could not rename: {e}")
-            
-            # Remove old .txt only if we saved synced .lrc
-            elif lrc_state == "synced" and os.path.exists(txt):
-                try:
-                    os.remove(txt)
-                except:
-                    pass
 
             log(f"   ✔ Saved [{used}/{mode}]")
             success_count += 1
@@ -1313,9 +1190,9 @@ def build_missing_for_selection():
                     if f.lower().endswith((".mp3", ".flac")):
                         song = os.path.join(rd, f)
                         lrc = os.path.splitext(song)[0] + ".lrc"
-                        txt = os.path.splitext(song)[0] + ".txt"
-                        # Only missing if BOTH .lrc and .txt don't exist
-                        if not os.path.exists(lrc) and not os.path.exists(txt):
+                        
+                        
+                        if not os.path.exists(lrc):
                             missing_targets.append(song)
     else:
         artist = selected_artists[0]
@@ -1326,9 +1203,9 @@ def build_missing_for_selection():
                 song = resolve_track_display_to_path(artist, track_list.get(i))
                 if os.path.isfile(song) and song.lower().endswith((".mp3", ".flac")):
                     lrc = os.path.splitext(song)[0] + ".lrc"
-                    txt = os.path.splitext(song)[0] + ".txt"
-                    # Only missing if BOTH .lrc and .txt don't exist
-                    if not os.path.exists(lrc) and not os.path.exists(txt):
+                    
+                    
+                    if not os.path.exists(lrc):
                         missing_targets.append(song)
         else:
             sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
@@ -1340,9 +1217,9 @@ def build_missing_for_selection():
                         if f.lower().endswith((".mp3", ".flac")):
                             song = os.path.join(rd, f)
                             lrc = os.path.splitext(song)[0] + ".lrc"
-                            txt = os.path.splitext(song)[0] + ".txt"
-                            # Only missing if BOTH .lrc and .txt don't exist
-                            if not os.path.exists(lrc) and not os.path.exists(txt):
+                            
+                            
+                            if not os.path.exists(lrc):
                                 missing_targets.append(song)
 
     seen = set()
@@ -1424,7 +1301,7 @@ def download_missing_queue():
             break
 
         lrc = os.path.splitext(song)[0] + ".lrc"
-        txt = os.path.splitext(song)[0] + ".txt"
+        
         song_name = os.path.basename(song)
         title = normalize_title(os.path.splitext(song_name)[0])
 
@@ -1509,25 +1386,6 @@ def download_missing_queue():
                 log(f"   ⚠ Rejected (mostly non-ASCII) [{used}/{mode}]")
                 failed_count += 1
                 continue
-
-            # Automatically rename plain lyrics to .txt
-            lrc_state = analyze_lrc(lrc)
-            if lrc_state == "plain":
-                txt_path = os.path.splitext(lrc)[0] + ".txt"
-                try:
-                    if os.path.exists(txt_path):
-                        os.remove(txt_path)
-                    os.rename(lrc, txt_path)
-                    log(f"   📝 Saved as .txt (plain lyrics)")
-                except Exception as e:
-                    log(f"   ⚠ Could not rename: {e}")
-            
-            # Remove old .txt only if we saved synced .lrc
-            elif lrc_state == "synced" and os.path.exists(txt):
-                try:
-                    os.remove(txt)
-                except:
-                    pass
 
             log(f"   ✔ Saved [{used}/{mode}]")
             success_count += 1
@@ -1658,16 +1516,19 @@ def open_custom_search():
             for part in parts:
                 part_stripped = part.strip()
                 part_lower = part_stripped.lower()
-                contains_artist = part_lower.startswith(artist_lower)
-                if contains_artist:
-                    if not artist_seen:
-                        artist_seen = True
-                        cleaned.append(part_stripped)  # Keep first occurrence
-                    else:
-                        if part_lower == artist_lower:
-                            continue  # Skip exact duplicate artist name
+                if part_lower.startswith(artist_lower):
+                    after = part_lower[len(artist_lower):]
+                    # Matches if: exact artist, OR artist followed by space/colon/comma
+                    # e.g. "Cypress Hill feat ..." or "Boyz II Men: Album" or "Boyz II Men"
+                    is_artist_variant = (after == "" or after[0] in " :,")
+                    if is_artist_variant:
+                        if not artist_seen:
+                            artist_seen = True
+                            cleaned.append(part_stripped)  # Keep first occurrence
                         else:
-                            cleaned.append(part_stripped)  # Keep "Artist: Something"
+                            continue  # Skip duplicate
+                    else:
+                        cleaned.append(part_stripped)
                 else:
                     cleaned.append(part_stripped)
             result = " - ".join(cleaned)
@@ -1726,7 +1587,7 @@ def open_custom_search():
             ui_call(cancel_btn.configure, {"state": "normal"})
 
             lrc = os.path.splitext(song_path)[0] + ".lrc"
-            txt = os.path.splitext(song_path)[0] + ".txt"
+            lrc = os.path.splitext(song_path)[0] + ".lrc"
 
             providers_synced = get_synced_provider_order()
             providers_plain = get_plain_provider_order()
@@ -1770,11 +1631,6 @@ def open_custom_search():
                 if reject_if_mostly_non_ascii(lrc):
                     log(f"   ⚠ Rejected (mostly non-ASCII) [{used}/{mode}]")
                 else:
-                    if os.path.exists(txt):
-                        try:
-                            os.remove(txt)
-                        except:
-                            pass
                     log(f"   ✔ Saved [{used}/{mode}]")
             else:
                 log("   ✖ Not found")
@@ -1833,7 +1689,7 @@ def about():
     ).pack(anchor="w", padx=14, pady=(14, 6))
 
     body = (
-        "Downloads synced (.lrc) or plain (.txt) lyrics next to your music files.\n\n"
+        "Downloads synced (.lrc) lyrics next to your music files.\n\n"
         "How it works:\n"
         "  - Select artists, albums or tracks then click Download Lyrics For Selection\n"
         "  - Always tries synced lyrics first, optional plain fallback via Settings\n"
