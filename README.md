@@ -55,7 +55,7 @@ tkinter           →  sudo apt install python3-tk
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/synced-lyrics-downloader.git
+git clone https://github.com/type0dev/synced-lyrics-downloader.git
 cd synced-lyrics-downloader
 
 # 2. Install the only dependency
@@ -104,6 +104,22 @@ Open **Settings → Options** to configure:
 | Language | Preferred lyrics language code (e.g. `en`) |
 | Strip CJK lines | Remove Chinese/Japanese/Korean lines from results |
 | Reject mostly non-ASCII | Filter out results in wrong language |
+
+---
+
+## Library Structure
+
+This app expects the standard 3-level folder structure:
+
+```
+Music/
+  Artist/
+    Album/
+      01 Track.mp3
+      02 Track.mp3
+```
+
+This is the default output of **MusicBrainz Picard**, **beets**, **Mp3tag**, and most music library managers. If your library is organized this way you're good to go.
 
 ---
 
