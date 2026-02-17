@@ -1,6 +1,6 @@
 # 🎵 Synced Lyrics Downloader
 
-A desktop GUI app for downloading synced (`.lrc`) and plain (`.txt`) lyrics for your local music library. Built with Python and tkinter — no internet browser required, no accounts, no ads.
+A desktop GUI app for downloading synced (`.lrc`) lyrics for your local music library. Built with Python and tkinter — no internet browser required, no accounts, no ads.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey)
@@ -17,7 +17,7 @@ A desktop GUI app for downloading synced (`.lrc`) and plain (`.txt`) lyrics for 
 ## Features
 
 - **Synced lyrics first** — always tries `.lrc` with timestamps before falling back to plain text
-- **Plain lyrics saved as `.txt`** — keeps your library clean and organized
+- **Everything saved as `.lrc`** — maximum compatibility with all media players
 - **Multiple providers** — Lrclib, Musixmatch, Megalobiz, NetEase, Genius (configurable priority)
 - **Smart scanning** — scan selection for missing lyrics, download only what's missing
 - **Custom Search** — override the search query for hard-to-find tracks
@@ -134,7 +134,7 @@ Music/
       01 Track Name.mp3
       01 Track Name.lrc      ← synced lyrics (timestamped)
       02 Another Track.mp3
-      02 Another Track.txt   ← plain lyrics (no timestamps)
+      02 Another Track.lrc   ← plain lyrics (no timestamps, still .lrc)
 ```
 
 ---
