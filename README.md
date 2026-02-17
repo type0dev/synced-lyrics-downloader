@@ -10,7 +10,7 @@ A desktop GUI app for downloading synced (`.lrc`) lyrics for your local music li
 
 ## Screenshots
 
-> Point the app at your music folder, select artists/albums/tracks, hit Download.
+![Synced Lyrics Downloader](https://raw.githubusercontent.com/type0dev/synced-lyrics-downloader/main/lyrics%20download%20screenshot.png)
 
 ---
 
