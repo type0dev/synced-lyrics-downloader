@@ -178,3 +178,4 @@ Settings are saved automatically to `lyrics_gui_config.json` in the same folder 
 ## License
 
 MIT — do whatever you want with it.
+
