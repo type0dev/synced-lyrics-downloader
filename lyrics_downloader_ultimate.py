@@ -109,6 +109,7 @@ config.setdefault("providers_enabled", default_enabled)
 config.setdefault("lang", "en")
 config.setdefault("allow_plain_fallback", False)
 config.setdefault("upgrade_plain_to_synced", True)  # Ask to upgrade plain lyrics
+config.setdefault("auto_upgrade_plain", False)  # Auto-upgrade without prompting
 config.setdefault("strip_cjk", True)
 config.setdefault("reject_non_ascii", True)
 config.setdefault("reject_non_ascii_ratio", 0.15)
@@ -242,17 +243,15 @@ missing_targets = []
 scanned_artists = set()  # Track which artists have been scanned for selective icon display
 
 
-def newest_mtime_in_tree(folder: str) -> int:
+def quick_mtime(folder: str) -> int:
+    """Fast mtime check - only looks at folder and immediate subfolders, not every file.
+    Good enough to detect new albums/tracks added without walking the whole tree."""
     newest = 0
     try:
-        for root_dir, _, files in os.walk(folder):
-            for f in files:
-                if f.lower().endswith((".mp3", ".flac", ".lrc")):
-                    p = os.path.join(root_dir, f)
-                    try:
-                        newest = max(newest, int(os.path.getmtime(p)))
-                    except:
-                        pass
+        newest = max(newest, int(os.path.getmtime(folder)))
+        for entry in os.scandir(folder):
+            if entry.is_dir():
+                newest = max(newest, int(entry.stat().st_mtime))
     except:
         pass
     return newest
@@ -361,17 +360,23 @@ def rebuild_artist_list_filtered(keep_selection_name=None):
     q = search_var.get().strip().lower() if 'search_var' in globals() else ""
 
     def add_artist(name: str):
-        # Show icons only if this artist has been scanned
-        if name in scanned_artists:
-            ap = os.path.join(MUSIC_DIR, name)
-            newest = newest_mtime_in_tree(ap)
+        ap = os.path.join(MUSIC_DIR, name)
+        # Check if we have a cached result for this artist
+        cached = next((v for k, v in lyrics_cache.items()
+                       if isinstance(k, tuple) and k[0] == ap and k[2] == "artist"), None)
+        if cached is not None:
+            # Show icon from cache - no scanning needed
+            icon = completeness_icon(cached["have"], cached["total"])
+            artist_list.insert(tk.END, f"{icon} {name}")
+        elif name in scanned_artists:
+            # Scanned this session but not cached yet - do quick scan
+            newest = quick_mtime(ap)
             key = (ap, newest, "artist")
-            if key not in lyrics_cache:
-                lyrics_cache[key] = scan_folder_completeness(ap)
-            res = lyrics_cache[key]
-            icon = completeness_icon(res["have"], res["total"])
+            lyrics_cache[key] = scan_folder_completeness(ap)
+            icon = completeness_icon(lyrics_cache[key]["have"], lyrics_cache[key]["total"])
             artist_list.insert(tk.END, f"{icon} {name}")
         else:
+            # Never scanned - no icon
             artist_list.insert(tk.END, name)
 
     if not q:
@@ -430,15 +435,6 @@ def create_tooltip(widget, text):
 
 # ------------------ Keyboard Shortcuts ------------------
 
-def set_busy_cursor():
-    root.configure(cursor="watch")
-    root.update()
-
-def set_normal_cursor():
-    root.configure(cursor="")
-    root.update()
-
-
 def setup_keyboard_shortcuts():
     """Setup global keyboard shortcuts"""
     root.bind('<F5>', lambda e: load_artists() if MUSIC_DIR else None)
@@ -471,7 +467,7 @@ def refresh_artist_list(keep_selection=True):
 
     all_artists = artists[:]
     rebuild_artist_list_filtered(keep_selection_name=sel_artist)
-
+    
 
 def refresh_current_view():
     if not artist_list.curselection():
@@ -569,7 +565,7 @@ def on_artist_select(event=None):
     if artist in scanned_artists:
         for album in albums:
             ap = os.path.join(artist_path, album)
-            newest = newest_mtime_in_tree(ap)
+            newest = quick_mtime(ap)
             key = (ap, newest, "album")
             if key not in lyrics_cache:
                 lyrics_cache[key] = scan_folder_completeness(ap)
@@ -863,15 +859,16 @@ def reject_if_mostly_non_ascii(path: str) -> bool:
 
 downloading = False
 cancel_requested = False
+upgrade_all_session = False  # Session-level "Yes to All" for upgrades
 
 
 def start_download():
-    global cancel_requested
+    global cancel_requested, upgrade_all_session
     if downloading:
         return
     cancel_requested = False
+    upgrade_all_session = False  # Reset "Yes to All" for new download session
     cancel_btn.configure(state="normal")
-    set_busy_cursor()
     threading.Thread(target=download_selected, daemon=True).start()
 
 
@@ -905,17 +902,15 @@ def resolve_track_display_to_path(artist: str, display: str) -> str:
 
 
 def download_selected():
-    global downloading, missing_targets
+    global downloading, missing_targets, upgrade_all_session
 
     if not artist_list.curselection() and not album_list.curselection() and not track_list.curselection():
         ui_call(messagebox.showwarning, "Select", "Select an artist/album/track first.")
         ui_call(cancel_btn.configure, {"state": "disabled"})
-        ui_call(set_normal_cursor)
         return
     if not MUSIC_DIR or not os.path.isdir(MUSIC_DIR):
         ui_call(messagebox.showwarning, "Music folder", "Pick a valid music folder first.")
         ui_call(cancel_btn.configure, {"state": "disabled"})
-        ui_call(set_normal_cursor)
         return
 
     downloading = True
@@ -949,7 +944,6 @@ def download_selected():
             ui_call(missing_scan_btn.configure, {"state": "normal"})
             ui_call(missing_dl_btn.configure, {"state": "normal"})
             ui_call(cancel_btn.configure, {"state": "disabled"})
-            ui_call(set_normal_cursor)
             return
         else:
             base_artist = os.path.join(MUSIC_DIR, artist)
@@ -1016,29 +1010,75 @@ def download_selected():
             if existing_lrc_state == "plain" and config.get("upgrade_plain_to_synced", True):
                 log("   ℹ Found plain lyrics (.lrc file)")
 
-                ui_result = {"done": False, "upgrade": False}
+                # Check if auto-upgrade is enabled or session-level "yes to all" is set
+                should_upgrade = config.get("auto_upgrade_plain", False) or upgrade_all_session
 
-                def ask_on_main():
-                    result = messagebox.askyesno(
-                        "Upgrade Plain Lyrics?",
-                        f"Found plain lyrics for:\n{song_name}\n\n"
-                        "Search for a synced version?",
-                        parent=root
-                    )
-                    ui_result["upgrade"] = result
-                    ui_result["done"] = True
+                if not should_upgrade:
+                    # Show dialog with Yes/No/Yes to All options
+                    ui_result = {"done": False, "upgrade": False, "upgrade_all": False}
 
-                ui_call(ask_on_main)
-                while not ui_result["done"]:
+                    def ask_on_main():
+                        # Custom dialog with 3 buttons
+                        dialog = tk.Toplevel(root)
+                        dialog.title("Upgrade Plain Lyrics?")
+                        dialog.transient(root)
+                        dialog.grab_set()
+                        
+                        # Center on parent
+                        root.update_idletasks()
+                        dialog_w = 400
+                        dialog_h = 150
+                        x = root.winfo_x() + (root.winfo_width() - dialog_w) // 2
+                        y = root.winfo_y() + (root.winfo_height() - dialog_h) // 2
+                        dialog.geometry(f"{dialog_w}x{dialog_h}+{x}+{y}")
+                        
+                        msg = f"Found plain lyrics for:\n{song_name}\n\nSearch for a synced version?"
+                        tk.Label(dialog, text=msg, padx=20, pady=20, wraplength=360).pack()
+                        
+                        btn_frame = tk.Frame(dialog)
+                        btn_frame.pack(pady=10)
+                        
+                        def on_yes():
+                            ui_result["upgrade"] = True
+                            ui_result["done"] = True
+                            dialog.destroy()
+                        
+                        def on_yes_all():
+                            ui_result["upgrade"] = True
+                            ui_result["upgrade_all"] = True
+                            ui_result["done"] = True
+                            dialog.destroy()
+                        
+                        def on_no():
+                            ui_result["upgrade"] = False
+                            ui_result["done"] = True
+                            dialog.destroy()
+                        
+                        tk.Button(btn_frame, text="Yes", command=on_yes, width=10).pack(side="left", padx=5)
+                        tk.Button(btn_frame, text="Yes to All", command=on_yes_all, width=10).pack(side="left", padx=5)
+                        tk.Button(btn_frame, text="No", command=on_no, width=10).pack(side="left", padx=5)
+                        
+                        dialog.protocol("WM_DELETE_WINDOW", on_no)
+
+                    ui_call(ask_on_main)
+                    while not ui_result["done"]:
+                        if should_cancel():
+                            break
+                        import time
+                        time.sleep(0.1)
+
                     if should_cancel():
                         break
-                    import time
-                    time.sleep(0.1)
+                    
+                    # Set session-level flag if "Yes to All" was clicked
+                    if ui_result["upgrade_all"]:
+                        upgrade_all_session = True
+                    
+                    should_upgrade = ui_result["upgrade"]
+                else:
+                    log("   🔄 Auto-upgrading (setting enabled or 'Yes to All' selected)")
 
-                if should_cancel():
-                    break
-
-                if ui_result["upgrade"]:
+                if should_upgrade:
                     log("   🔄 Searching for synced version...")
                     inferred_artist = infer_artist_from_path(song) or (selected_artists[0] if selected_artists else "")
                     query = f"{title} {inferred_artist}".strip()
@@ -1155,7 +1195,6 @@ def download_selected():
     ui_call(missing_scan_btn.configure, {"state": "normal"})
     ui_call(missing_dl_btn.configure, {"state": "normal"})
     ui_call(cancel_btn.configure, {"state": "disabled"})
-    ui_call(set_normal_cursor)
 
 
 # ------------------ Missing (Selection-only) ------------------
@@ -1174,79 +1213,86 @@ def build_missing_for_selection():
         set_status("Select an artist/album/track first.")
         return
 
-    # Snapshot UI state needed by the worker before threading
-    sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
-    sel_tracks = [track_list.get(i) for i in track_list.curselection()]
-
+    # Count what we're about to scan
     if len(selected_artists) > 1:
         item_desc = f"{len(selected_artists)} artists"
-    elif sel_tracks:
-        item_desc = f"{len(sel_tracks)} tracks"
-    elif sel_albums:
-        item_desc = f"{len(sel_albums)} albums"
     else:
-        item_desc = "1 artist"
+        sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
+        if track_list.curselection():
+            item_desc = f"{len(track_list.curselection())} tracks"
+        elif sel_albums:
+            item_desc = f"{len(sel_albums)} albums"
+        else:
+            item_desc = "1 artist"
 
     set_status(f"Scanning {item_desc}...")
     log(f"Scanning {item_desc}...")
-    set_busy_cursor()
 
-    def worker():
-        global missing_targets, scanned_artists
-        found = []
+    if len(selected_artists) > 1:
+        roots = [os.path.join(MUSIC_DIR, a) for a in selected_artists]
+        for root_dir in roots:
+            for rd, _, files in os.walk(root_dir):
+                for f in files:
+                    if f.lower().endswith((".mp3", ".flac")):
+                        song = os.path.join(rd, f)
+                        lrc = os.path.splitext(song)[0] + ".lrc"
+                        
+                        
+                        if not os.path.exists(lrc):
+                            missing_targets.append(song)
+    else:
+        artist = selected_artists[0]
+        base_artist = os.path.join(MUSIC_DIR, artist)
 
-        if len(selected_artists) > 1:
-            roots = [os.path.join(MUSIC_DIR, a) for a in selected_artists]
+        if track_list.curselection():
+            for i in track_list.curselection():
+                song = resolve_track_display_to_path(artist, track_list.get(i))
+                if os.path.isfile(song) and song.lower().endswith((".mp3", ".flac")):
+                    lrc = os.path.splitext(song)[0] + ".lrc"
+                    
+                    
+                    if not os.path.exists(lrc):
+                        missing_targets.append(song)
+        else:
+            sel_albums = [strip_icon(album_list.get(i)) for i in album_list.curselection()]
+            roots = [os.path.join(base_artist, alb) for alb in sel_albums] if sel_albums else [base_artist]
+
             for root_dir in roots:
                 for rd, _, files in os.walk(root_dir):
                     for f in files:
                         if f.lower().endswith((".mp3", ".flac")):
                             song = os.path.join(rd, f)
                             lrc = os.path.splitext(song)[0] + ".lrc"
+                            
+                            
                             if not os.path.exists(lrc):
-                                found.append(song)
-        else:
-            artist = selected_artists[0]
-            base_artist = os.path.join(MUSIC_DIR, artist)
+                                missing_targets.append(song)
 
-            if sel_tracks:
-                for t in sel_tracks:
-                    song = resolve_track_display_to_path(artist, t)
-                    if os.path.isfile(song) and song.lower().endswith((".mp3", ".flac")):
-                        lrc = os.path.splitext(song)[0] + ".lrc"
-                        if not os.path.exists(lrc):
-                            found.append(song)
-            else:
-                roots = [os.path.join(base_artist, alb) for alb in sel_albums] if sel_albums else [base_artist]
-                for root_dir in roots:
-                    for rd, _, files in os.walk(root_dir):
-                        for f in files:
-                            if f.lower().endswith((".mp3", ".flac")):
-                                song = os.path.join(rd, f)
-                                lrc = os.path.splitext(song)[0] + ".lrc"
-                                if not os.path.exists(lrc):
-                                    found.append(song)
+    seen = set()
+    missing_targets = [p for p in missing_targets if not (p in seen or seen.add(p))]
 
-        seen = set()
-        missing_targets = [p for p in found if not (p in seen or seen.add(p))]
-
-        # Mark artists as scanned and clear their cache
-        for a in selected_artists:
-            scanned_artists.add(a)
-            ap = os.path.join(MUSIC_DIR, a)
-            keys_to_remove = [k for k in lyrics_cache.keys() if isinstance(k, tuple) and k[0].startswith(ap)]
-            for k in keys_to_remove:
-                lyrics_cache.pop(k, None)
-
-        log(f"Missing scan (selection): {len(missing_targets)} tracks missing .lrc")
-        ui_call(set_status, f"Missing: {len(missing_targets)} tracks without lyrics")
-        ui_call(missing_scan_btn.configure, {"text": f"Scan Missing (Selection) [{len(missing_targets)}]"})
-        ui_call(missing_dl_btn.configure, {"state": ("normal" if missing_targets else "disabled")})
-        ui_call(refresh_artist_list, True)
-        ui_call(refresh_current_view)
-        ui_call(set_normal_cursor)
-
-    threading.Thread(target=worker, daemon=True).start()
+    log(f"Missing scan (selection): {len(missing_targets)} tracks missing .lrc")
+    set_status(f"Missing: {len(missing_targets)} tracks without lyrics")
+    
+    # Update button text
+    missing_scan_btn.configure(text=f"Scan Missing (Selection) [{len(missing_targets)}]")
+    missing_dl_btn.configure(state=("normal" if missing_targets else "disabled"))
+    
+    # Mark these artists as scanned so icons will show
+    global scanned_artists
+    for artist in selected_artists:
+        scanned_artists.add(artist)
+    
+    # Clear cache for scanned items to force rescan with icons
+    for artist in selected_artists:
+        ap = os.path.join(MUSIC_DIR, artist)
+        keys_to_remove = [k for k in lyrics_cache.keys() if isinstance(k, tuple) and k[0].startswith(ap)]
+        for k in keys_to_remove:
+            lyrics_cache.pop(k, None)
+    
+    # Refresh the view to show icons for scanned items
+    refresh_artist_list(keep_selection=True)
+    refresh_current_view()
 
 
 def start_download_missing():
@@ -1264,7 +1310,6 @@ def start_download_missing():
         return
 
     cancel_btn.configure(state="normal")
-    set_busy_cursor()
     threading.Thread(target=download_missing_queue, daemon=True).start()
 
 
@@ -1432,7 +1477,6 @@ def download_missing_queue():
     ui_call(missing_scan_btn.configure, {"state": "normal"})
     ui_call(missing_dl_btn.configure, {"state": "normal"})
     ui_call(cancel_btn.configure, {"state": "disabled"})
-    ui_call(set_normal_cursor)
 
 
 # ------------------ Custom Search ------------------
@@ -1656,11 +1700,9 @@ def open_custom_search():
             ui_call(missing_scan_btn.configure, {"state": "normal"})
             ui_call(missing_dl_btn.configure, {"state": "normal"})
             ui_call(cancel_btn.configure, {"state": "disabled"})
-            ui_call(set_normal_cursor)
             set_status("Done.")
 
         win.destroy()
-        set_busy_cursor()
         threading.Thread(target=worker, daemon=True).start()
 
     tk.Button(
@@ -1827,8 +1869,16 @@ def open_options_window():
     
     upgrade_var = tk.BooleanVar(value=config.get("upgrade_plain_to_synced", True))
     tk.Checkbutton(
-        left, text="Auto-upgrade plain → synced",
+        left, text="Auto-upgrade plain → synced (prompt for each)",
         variable=upgrade_var,
+        bg=t["bg"], fg=t["fg"], selectcolor=t["bg"],
+        activebackground=t["bg"], activeforeground=t["fg"]
+    ).pack(anchor="w", pady=(0, 6))
+    
+    auto_upgrade_var = tk.BooleanVar(value=config.get("auto_upgrade_plain", False))
+    tk.Checkbutton(
+        left, text="Auto-upgrade plain → synced (no prompt)",
+        variable=auto_upgrade_var,
         bg=t["bg"], fg=t["fg"], selectcolor=t["bg"],
         activebackground=t["bg"], activeforeground=t["fg"]
     ).pack(anchor="w", pady=(0, 10))
@@ -1919,7 +1969,6 @@ def open_options_window():
              bg=t["panel"], fg=t["fg"], insertbackground=t["fg"],
              highlightbackground=t["border"], highlightcolor=t["border"]).grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
 
-
     footer = tk.Frame(win, bg=t["bg"])
     footer.pack(fill="x", padx=12, pady=12)
 
@@ -1944,6 +1993,7 @@ def open_options_window():
 
         config["allow_plain_fallback"] = plain
         config["upgrade_plain_to_synced"] = bool(upgrade_var.get())
+        config["auto_upgrade_plain"] = bool(auto_upgrade_var.get())
         config["providers_enabled"] = {p: bool(provider_vars[p].get()) for p in ALL_PROVIDERS}
         config["providers_order"] = fixed
         config["lang"] = lang_var.get()
